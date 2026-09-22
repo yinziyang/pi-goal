@@ -1,0 +1,20 @@
+{
+  "name": "pi-goal",
+  "version": "0.1.0",
+  "description": "为 pi 提供与 Claude Code 语义一致的 /goal：设定完成条件，由独立评估模型逐轮判定，自动持续工作直到达成。",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "license": "UNLICENSED",
+  "private": true,
+  "files": ["extensions", "README.md"],
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/goal/index.ts"]
+  }
+}
