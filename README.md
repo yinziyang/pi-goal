@@ -3,6 +3,20 @@
 为 pi 提供与 Claude Code 语义一致的 `/goal`。
 设定一个完成条件后，agent 自动一轮接一轮地工作，每轮结束由一个独立的模型对照对话判断条件是否成立，直到达成为止。
 
+## 安装
+
+```bash
+pi install git:git@github.com:yinziyang/pi-goal.git
+```
+
+需要 pi 0.87.0 或更高版本。
+安装后新开一个 pi 会话，启动信息的 Extensions 列表里会出现 `yinziyang/pi-goal:goal`。
+
+- 更新到最新提交：`pi update --extensions`。
+- 只对当前项目生效：加 `-l`，写入项目的 `.pi/settings.json`。
+- 临时试用、不写入设置：`pi -e git:git@github.com:yinziyang/pi-goal.git`。
+- 卸载：`pi remove git:git@github.com:yinziyang/pi-goal.git`。
+
 ## 用法
 
 - `/goal <完成条件>`：设定目标，立即以条件本身为指令开始一轮。已有目标时被新目标替换。条件最长 4000 字符。
