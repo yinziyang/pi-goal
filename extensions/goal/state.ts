@@ -6,6 +6,8 @@
 // 会话条目随分支走，所以恢复会话、/tree 切换分支后，从当前分支的条目就能还原出目标状态。
 // 轮数、耗时、token 这些计数不写进会话：与 Claude Code 一致，恢复会话时它们从零重新计。
 
+import { type AssistantMessage, isContextOverflow } from "@earendil-works/pi-ai";
+
 /** 会话条目的 customType。 */
 export const GOAL_ENTRY = "pi-goal";
 
@@ -92,14 +94,19 @@ export function restoreGoal(entries: EntryLike[]): { active?: { id: string; cond
  * 对齐 Claude Code 清除目标的四类：认证失败、额度耗尽、压缩后仍然上下文溢出、模型不可用。
  * 其余错误（限流、网络抖动、服务过载等）由 pi 自己的重试机制处理，重试仍失败时目标只暂停、不清除。
  * 返回命中的类别说明，未命中返回 null。
+ *
+ * pi 的错误只有文本、没有状态码，pi 自己判断重试与溢出也靠文本匹配，所以这里同样只能按文本归类。
+ * 误判为清除的代价（目标丢失，要重新 /goal）高于误判为暂停（发条消息即可继续），拿不准的写法宁可不收。
+ * 溢出直接用 pi-ai 的 isContextOverflow：它覆盖二十多家 provider 的写法，并排除了 Bedrock 限流「Too many tokens」这类假溢出，随 pi 升级同步更新。
+ * 额度类的关键字对齐 pi-ai 不再重试的额度错误（utils/retry.ts 的 NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN）。
  */
 export function unrecoverableCause(errorMessage: string): string | null {
+	if (isContextOverflow({ stopReason: "error", errorMessage } as AssistantMessage)) return "上下文溢出且压缩未能解决";
 	const text = errorMessage.toLowerCase();
 	const causes: Array<[RegExp, string]> = [
 		[/\b(401|403)\b|unauthori[sz]ed|authentication|invalid[_ ]api[_ ]key|incorrect api key|not logged in|login required|expired token|invalid token/, "认证失败"],
-		[/insufficient[_ ]quota|credit balance|out of credits|billing|payment required|\b402\b/, "额度耗尽"],
-		[/context[_ ]length|context window|maximum context|too many tokens|prompt is too long|context_length_exceeded|input is too long/, "上下文溢出且压缩未能解决"],
-		[/model[_ ]not[_ ]found|model .*does not exist|unknown model|unsupported model|model is not available|no such model/, "模型不可用"],
+		[/insufficient[_ ]quota|credit balance|out of credits|billing|payment required|\b402\b|usage limit|usagelimiterror|quota exceeded|out of budget|available balance/, "额度耗尽"],
+		[/model[_ ]not[_ ]found|model .*does not exist|unknown model|unsupported model|model is not available|no such model|model is not supported|not_found_error.*\bmodel\b/, "模型不可用"],
 	];
 	for (const [re, cause] of causes) if (re.test(text)) return cause;
 	return null;

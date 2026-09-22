@@ -52,6 +52,23 @@ test("unrecoverableCause 只认四类必须人工处理的错误", () => {
 	assert.equal(unrecoverableCause("socket hang up"), null);
 });
 
+// 以下错误文本取自 pi-ai 0.87.0 的 provider 实现与 utils/overflow.ts 注释里列出的真实格式。
+test("unrecoverableCause 按 pi 的溢出判定识别各家 provider 的写法，限流不算溢出", () => {
+	assert.equal(unrecoverableCause("Throttling error: Too many tokens, please wait before trying again."), null, "Bedrock 限流是暂时的，不能清除目标");
+	assert.equal(unrecoverableCause('413 {"error":{"type":"request_too_large","message":"Request exceeds the maximum size"}}'), "上下文溢出且压缩未能解决");
+	assert.equal(unrecoverableCause("The input token count (1196265) exceeds the maximum number of tokens allowed (1048575)"), "上下文溢出且压缩未能解决");
+	assert.equal(unrecoverableCause("Your input exceeds the context window of this model"), "上下文溢出且压缩未能解决");
+});
+
+test("unrecoverableCause 识别 pi 不再重试的额度类错误与服务端拒绝的模型", () => {
+	assert.equal(unrecoverableCause("You have hit your ChatGPT usage limit (plus plan). Try again in ~42 min."), "额度耗尽");
+	assert.equal(unrecoverableCause("Monthly usage limit reached"), "额度耗尽");
+	assert.equal(unrecoverableCause("quota exceeded for this project"), "额度耗尽");
+	assert.equal(unrecoverableCause("out of budget"), "额度耗尽");
+	assert.equal(unrecoverableCause("400 The 'gpt-5.5-codex' model is not supported when using Codex with a ChatGPT account."), "模型不可用");
+	assert.equal(unrecoverableCause('404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-foo"}}'), "模型不可用");
+});
+
 test("countToolCalls 与 sumTokens 只统计助手消息", () => {
 	const msgs = [
 		{ role: "user", content: [{ type: "toolCall" }] },

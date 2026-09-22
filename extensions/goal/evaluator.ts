@@ -20,7 +20,7 @@ export interface TranscriptEntry {
 	message?: { role?: string; content?: unknown; toolName?: string; isError?: boolean; customType?: string };
 }
 
-// 单项与整体的截断上限（字符）。工具结果常常很长，只保留开头。整体超限时丢掉最早的内容，最新进展最能说明条件是否成立。
+// 单项与整体的截断上限（字符）。工具结果常常很长，保留首尾；其余单项只保留开头。整体超限时丢掉最早的内容（压缩摘要除外），最新进展最能说明条件是否成立。
 const TOOL_ARGS_LIMIT = 400;
 const TOOL_RESULT_LIMIT = 2_000;
 const TEXT_LIMIT = 4_000;
@@ -28,6 +28,15 @@ export const TRANSCRIPT_LIMIT = 60_000;
 
 function clip(text: string, limit: number): string {
 	return text.length > limit ? `${text.slice(0, limit)}…（已截断，原长 ${text.length} 字符）` : text;
+}
+
+// 工具结果超限时保留首尾、丢掉中间，末尾分到四分之三。
+// 测试汇总、退出码、报错通常在输出末尾，pi 的 bash 工具截断时同样保留末尾。
+// 开头留一小段，用来看出这是哪条命令的输出。
+function clipKeepTail(text: string, limit: number): string {
+	if (text.length <= limit) return text;
+	const head = Math.floor(limit / 4);
+	return `${text.slice(0, head)}\n…（中间已截断，原长 ${text.length} 字符）…\n${text.slice(text.length - (limit - head))}`;
 }
 
 function textOf(content: unknown): string {
@@ -54,10 +63,12 @@ function toolCallsOf(content: unknown): string[] {
  * ownCustomType 是本扩展续跑消息的 customType，这些消息只是转述上一次的评估结论，不作为证据，跳过。
  */
 export function serializeTranscript(entries: TranscriptEntry[], ownCustomType: string, limit = TRANSCRIPT_LIMIT): string {
+	// 压缩摘要单独放在最前面，整体超限时不参与丢弃：它是压缩之前全部工作的唯一记录，早期证据只能从这里看到。
+	const summaries: string[] = [];
 	const parts: string[] = [];
 	for (const entry of entries) {
 		if (entry.type === "compaction" && entry.summary) {
-			parts.push(`[早先对话的摘要]\n${clip(entry.summary, TEXT_LIMIT)}`);
+			summaries.push(`[早先对话的摘要]\n${clip(entry.summary, TEXT_LIMIT)}`);
 			continue;
 		}
 		if (entry.type === "custom_message") {
@@ -75,12 +86,14 @@ export function serializeTranscript(entries: TranscriptEntry[], ownCustomType: s
 			const lines = [textOf(m.content), ...toolCallsOf(m.content)].filter(Boolean);
 			if (lines.length) parts.push(`[助手]\n${clip(lines.join("\n"), TEXT_LIMIT)}`);
 		} else if (m.role === "toolResult") {
-			parts.push(`[工具结果 ${m.toolName ?? ""}${m.isError ? "（出错）" : ""}]\n${clip(textOf(m.content), TOOL_RESULT_LIMIT)}`);
+			parts.push(`[工具结果 ${m.toolName ?? ""}${m.isError ? "（出错）" : ""}]\n${clipKeepTail(textOf(m.content), TOOL_RESULT_LIMIT)}`);
 		}
 	}
+	const head = summaries.map((s) => `${s}\n\n`).join("");
+	const budget = Math.max(0, limit - head.length);
 	let text = parts.join("\n\n");
-	if (text.length > limit) text = `…（更早的对话已省略）\n\n${text.slice(text.length - limit)}`;
-	return text;
+	if (text.length > budget) text = `…（更早的对话已省略）\n\n${text.slice(text.length - budget)}`;
+	return head + text;
 }
 
 export const EVALUATOR_SYSTEM_PROMPT = [
@@ -109,23 +122,35 @@ export function buildEvaluatorPrompt(condition: string, transcript: string): str
 	].join("\n");
 }
 
-/** 从评估模型的回复里解析判定；找不到合法 JSON 或字段不合规时返回 null。 */
+/**
+ * 从评估模型的回复里解析判定；找不到合法 JSON 或字段不合规时返回 null。
+ * 理由里可能含 `}`，JSON 里也可能嵌套对象，所以不能按第一个 `}` 截断。
+ * 做法是从每个 `{` 出发，依次尝试截到其后每个 `}`，取第一个能解析成合规判定的对象。
+ * 回复只有几百字符，逐个尝试的开销可以忽略。
+ */
 export function parseVerdict(text: string): Verdict | null {
-	for (const match of text.matchAll(/\{[\s\S]*?\}/g)) {
-		let obj: unknown;
-		try {
-			obj = JSON.parse(match[0]);
-		} catch {
-			continue;
+	for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
+		for (let end = text.indexOf("}", start); end >= 0; end = text.indexOf("}", end + 1)) {
+			const verdict = toVerdict(text.slice(start, end + 1));
+			if (verdict) return verdict;
 		}
-		if (!obj || typeof obj !== "object") continue;
-		const raw = String((obj as { verdict?: unknown }).verdict ?? "").toLowerCase().replace(/[\s-]+/g, "_");
-		const verdict = raw === "met" ? "met" : raw === "not_met" || raw === "notmet" ? "not_met" : raw === "impossible" ? "impossible" : null;
-		if (!verdict) continue;
-		const reason = String((obj as { reason?: unknown }).reason ?? "").trim() || "（评估者未给出理由）";
-		return { verdict, reason };
 	}
 	return null;
+}
+
+function toVerdict(candidate: string): Verdict | null {
+	let obj: unknown;
+	try {
+		obj = JSON.parse(candidate);
+	} catch {
+		return null;
+	}
+	if (!obj || typeof obj !== "object") return null;
+	const raw = String((obj as { verdict?: unknown }).verdict ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+	const verdict = raw === "met" ? "met" : raw === "not_met" || raw === "notmet" ? "not_met" : raw === "impossible" ? "impossible" : null;
+	if (!verdict) return null;
+	const reason = String((obj as { reason?: unknown }).reason ?? "").trim() || "（评估者未给出理由）";
+	return { verdict, reason };
 }
 
 /**

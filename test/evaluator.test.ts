@@ -12,6 +12,12 @@ test("parseVerdict 接受三种判定及其常见写法，拒绝不合规的回�
 	assert.equal(parseVerdict("{不是 JSON}"), null);
 });
 
+test("parseVerdict 容忍理由里的花括号与嵌套对象", () => {
+	assert.deepEqual(parseVerdict('{"verdict":"not_met","reason":"缺少 } 号"}'), { verdict: "not_met", reason: "缺少 } 号" });
+	assert.deepEqual(parseVerdict('{"verdict":"not_met","reason":"函数体 {} 还是空的"}'), { verdict: "not_met", reason: "函数体 {} 还是空的" });
+	assert.deepEqual(parseVerdict('判定：{"verdict":"met","reason":"ok","evidence":{"exit":0}} 以上'), { verdict: "met", reason: "ok" });
+});
+
 test("serializeTranscript 覆盖各类条目，跳过本扩展的续跑消息，工具结果截断", () => {
 	const text = serializeTranscript(
 		[
@@ -39,6 +45,22 @@ test("serializeTranscript 超出总长时保留最新的内容", () => {
 	assert.match(text, /^…（更早的对话已省略）/);
 	assert.match(text, /第49条/);
 	assert.doesNotMatch(text, /第0条 /);
+});
+
+test("serializeTranscript 截断工具结果时保留末尾，测试汇总通常在那里", () => {
+	const output = [...Array.from({ length: 120 }, (_, i) => `✔ 用例 ${i} 的描述文字写得比较长一些`), "ℹ pass 120", "ℹ fail 0"].join("\n");
+	const text = serializeTranscript([{ type: "message", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: output }] } }], "own");
+	assert.match(text, /用例 0 /, "开头仍保留一部分，便于看出是哪条命令的输出");
+	assert.match(text, /ℹ fail 0$/);
+	assert.match(text, /已截断/);
+});
+
+test("serializeTranscript 超出总长时保留压缩摘要", () => {
+	const entries = [{ type: "compaction", summary: "早先已让 a.ts 的测试通过" }, ...Array.from({ length: 50 }, (_, i) => ({ type: "message", message: { role: "user", content: `第${i}条 ${"y".repeat(100)}` } }))];
+	const text = serializeTranscript(entries, "own", 1_000);
+	assert.match(text, /^\[早先对话的摘要\]\n早先已让 a.ts 的测试通过\n\n…（更早的对话已省略）/);
+	assert.match(text, /第49条/);
+	assert.ok(text.length <= 1_000 + 50, "摘要计入总长上限");
 });
 
 test("buildEvaluatorPrompt 把条件与对话作为数据包裹", () => {

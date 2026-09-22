@@ -85,5 +85,8 @@ RPC 模式不支持组件类的小部件，那里退回用 `setStatus` 发送同
 
 ## 开发
 
-- `npm test` 运行单元测试。
+- `npm test` 运行全部测试，需要先 `npm install` 装上固定版本的 pi 作为开发依赖。
+  - `test/state.test.ts`、`test/evaluator.test.ts` 是纯函数的单元测试。
+  - `test/index.test.ts` 在真实的 pi 会话里加载本扩展，用 pi-ai 的 faux provider 按脚本回复，跑完整个 `/goal` 循环，覆盖事件时序。
+  - 升级 pi 时先改 `devDependencies` 里的版本再跑测试。
 - 源码在 `extensions/goal/`：`state.ts` 是命令解析、记录与状态还原，`evaluator.ts` 是评估输入的整理与判定解析，`index.ts` 是 pi 事件接线。
