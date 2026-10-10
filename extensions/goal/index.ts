@@ -18,7 +18,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { randomUUID } from "node:crypto";
-import { buildEvaluatorPrompt, EVALUATOR_SYSTEM_PROMPT, parseVerdict, resolveEvaluatorModel, serializeTranscript, type TranscriptEntry, type Verdict } from "./evaluator.ts";
+import { buildEvaluatorPrompt, EVALUATOR_SYSTEM_PROMPT, isLatestSummaryInvalid, parseVerdict, resolveEvaluatorModel, serializeTranscript, type TranscriptEntry, type Verdict } from "./evaluator.ts";
 import {
 	countToolCalls,
 	formatDuration,
@@ -190,6 +190,8 @@ export default function goal(pi: ExtensionAPI) {
 		if (!model) throw new Error("当前没有可用的模型");
 
 		const entries = ctx.sessionManager.buildContextEntries() as unknown as TranscriptEntry[];
+		// 不依赖压缩扩展是否已写入作废记录：该记录可能晚于 agent_end 才追加，这里直接扫描原始分支。
+		const summaryInvalid = isLatestSummaryInvalid(ctx.sessionManager.getBranch() as unknown as Parameters<typeof isLatestSummaryInvalid>[0]);
 		// 本轮最后一条助手消息是否已经写进会话不依赖事件时序：没找到就把本轮消息补在后面。
 		const lastTs = [...runMessages].reverse().find((m) => m.role === "assistant")?.timestamp;
 		const persisted = lastTs !== undefined && entries.some((e) => e.type === "message" && (e.message as AgentMessageLike | undefined)?.timestamp === lastTs);
@@ -199,7 +201,7 @@ export default function goal(pi: ExtensionAPI) {
 			model,
 			{
 				systemPrompt: EVALUATOR_SYSTEM_PROMPT,
-				messages: [{ role: "user", content: [{ type: "text", text: buildEvaluatorPrompt(active.condition, serializeTranscript(all, CONTINUE_TYPE)) }], timestamp: now() }],
+				messages: [{ role: "user", content: [{ type: "text", text: buildEvaluatorPrompt(active.condition, serializeTranscript(all, CONTINUE_TYPE, undefined, { summaryInvalid })) }], timestamp: now() }],
 			},
 			{ signal: lifecycle.signal },
 		);

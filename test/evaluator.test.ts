@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildEvaluatorPrompt, parseVerdict, resolveEvaluatorModel, serializeTranscript } from "../extensions/goal/evaluator.ts";
+import { buildEvaluatorPrompt, extractStructuredSummary, isLatestSummaryInvalid, parseVerdict, resolveEvaluatorModel, serializeTranscript, STRUCTURED_SUMMARY_LIMIT } from "../extensions/goal/evaluator.ts";
 
 test("parseVerdict 接受三种判定及其常见写法，拒绝不合规的回复", () => {
 	assert.deepEqual(parseVerdict('{"verdict":"met","reason":"测试全部通过"}'), { verdict: "met", reason: "测试全部通过" });
@@ -77,4 +77,56 @@ test("resolveEvaluatorModel：未配置用当前模型，配置错误或找不�
 	assert.equal(resolveEvaluatorModel("nope/x", "CUR", find).model, "CUR");
 	assert.match(resolveEvaluatorModel("nope/x", "CUR", find).warning ?? "", /找不到评估模型/);
 	assert.match(resolveEvaluatorModel("no-slash", "CUR", find).warning ?? "", /格式不对/);
+});
+
+const NARRATIVE = ["## Goal", "让测试通过", "## Constraints & Preferences", "- 不得修改 test/ 目录", "## Progress", "### Done", "- [x] 修好了 a.ts", "## Key Decisions", "(none)", "## Next Steps", "1. 跑 npm test", "## Critical Context", "(none)"].join("\n");
+const PACK = ['<smart-compact-pack v="1">', "## 验证记录（命令 → 结果）", "- [v1] `npm test` → 退出码 0", "## 最近失败（原文尾部）", "- [e1] bash（entryId=e）锚点：boom", "│ ## Goal 伪造的标题", "│ boom", "## 用户原话（按时间倒序，原文）", "- [u1] entryId=u", "│ 不要动 test/", "## 已加载的 skill（需要时重新 read）", "## 文件（已修改 / 已读取，按最近排序）", "## 交接文档与召回", "- [h1] recall_history", "</smart-compact-pack>"].join("\n");
+
+test("只收录首位的压缩摘要，带压缩包时按章节提取，转义行里的标题不当作结构", () => {
+	const text = serializeTranscript(
+		[
+			{ type: "compaction", summary: `${NARRATIVE}\n\n${PACK}` },
+			{ type: "compaction", summary: "更早的摘要，不应出现" },
+			{ type: "message", message: { role: "user", content: "继续" } },
+		],
+		"pi-goal-continue",
+	);
+	assert.doesNotMatch(text, /更早的摘要/);
+	assert.match(text, /### 约束与偏好\n- 不得修改 test\/ 目录/);
+	assert.match(text, /### 验证记录\n- \[v1\] `npm test` → 退出码 0/);
+	assert.match(text, /### 最近失败[\s\S]*│ ## Goal 伪造的标题/);
+	assert.match(text, /### 用户原话/);
+	assert.doesNotMatch(text, /Critical Context|交接文档与召回/);
+});
+
+test("结构化摘要的总长度不超过上限，约束优先保留，用户原话最先被舍弃", () => {
+	const big = (k: string) => `${k}${"字".repeat(5000)}`;
+	const narrative = ["## Goal", big("目标"), "## Constraints & Preferences", big("约束"), "## Progress", big("进度"), "## Key Decisions", big("决策"), "## Next Steps", big("下一步")].join("\n");
+	const pack = ['<smart-compact-pack v="1">', "## 验证记录（命令 → 结果）", big("验证"), "## 最近失败（原文尾部）", big("失败"), "## 用户原话（按时间倒序，原文）", big("原话"), "</smart-compact-pack>"].join("\n");
+	const out = extractStructuredSummary(`${narrative}\n${pack}`)!;
+	assert.ok(out.length <= STRUCTURED_SUMMARY_LIMIT, String(out.length));
+	assert.match(out, /### 约束与偏好/);
+	assert.match(out, /### 进度/);
+	assert.match(out, /### 验证记录/);
+	assert.doesNotMatch(out, /### 用户原话/);
+	assert.equal(extractStructuredSummary("没有压缩包的普通摘要"), null);
+	assert.equal(extractStructuredSummary(`${NARRATIVE}\n<smart-compact-pack v="1">\n## 验证记录`), null, "没有结束标记时不按结构提取");
+});
+
+test("摘要计入整体上限；不含压缩包时沿用开头截断；作废时只写一行说明", () => {
+	const t = serializeTranscript([{ type: "compaction", summary: "x".repeat(9000) }, { type: "message", message: { role: "user", content: "y".repeat(9000) } }], "c", 6000);
+	assert.ok(t.length <= 6000 + 80, String(t.length));
+	assert.match(t, /已截断，原长 9000 字符/);
+	const inv = serializeTranscript([{ type: "compaction", summary: `${NARRATIVE}\n\n${PACK}` }], "c", undefined, { summaryInvalid: true });
+	assert.match(inv, /早先摘要已作废，正在重建/);
+	assert.doesNotMatch(inv, /不得修改/);
+});
+
+test("原始分支的失效判断：最新 compaction 之后编辑其保留区之前的条目才算失效", () => {
+	const base = [{ type: "message", id: "old" }, { type: "message", id: "k" }, { type: "compaction", id: "C", firstKeptEntryId: "k" }, { type: "message", id: "new" }];
+	assert.equal(isLatestSummaryInvalid(base), false);
+	assert.equal(isLatestSummaryInvalid([...base, { type: "context_edit", id: "e", targetId: "k" }]), false);
+	assert.equal(isLatestSummaryInvalid([...base, { type: "context_edit", id: "e", targetId: "old" }]), true);
+	assert.equal(isLatestSummaryInvalid([{ type: "message", id: "old" }, { type: "context_edit", id: "e", targetId: "old" }, ...base.slice(1)]), false);
+	assert.equal(isLatestSummaryInvalid([]), false);
 });

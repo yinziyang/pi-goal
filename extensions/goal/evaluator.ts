@@ -20,7 +20,7 @@ export interface TranscriptEntry {
 	message?: { role?: string; content?: unknown; toolName?: string; isError?: boolean; customType?: string };
 }
 
-// 单项与整体的截断上限（字符）。工具结果常常很长，保留首尾；其余单项只保留开头。整体超限时丢掉最早的内容（压缩摘要除外），最新进展最能说明条件是否成立。
+// 单项与整体的截断上限（字符）。工具结果常常很长，保留首尾；其余单项只保留开头。整体超限时丢掉最早的对话内容，压缩摘要放在最前面并计入整体上限，最新进展最能说明条件是否成立。
 const TOOL_ARGS_LIMIT = 400;
 const TOOL_RESULT_LIMIT = 2_000;
 const TEXT_LIMIT = 4_000;
@@ -58,17 +58,110 @@ function toolCallsOf(content: unknown): string[] {
 		});
 }
 
+// smart-compact 压缩摘要的结构（与 pi-smart-compact 的 pack.ts 一致）。
+const PACK_OPEN = '<smart-compact-pack v="1">';
+const PACK_CLOSE = "</smart-compact-pack>";
+// 压缩包里以这个前缀开头的行是转义后的原文，其中的标题不是结构。
+const ESCAPE_PREFIX = "│";
+const SECTION_LIMIT = 3_000;
+export const STRUCTURED_SUMMARY_LIMIT = 14_000;
+// 叙述与压缩包中要提取的章节，按整体超限时的保留优先级排列。
+const SECTION_PRIORITY: { key: string; title: string; heading: string; inPack: boolean }[] = [
+	{ key: "constraints", title: "约束与偏好", heading: "## Constraints & Preferences", inPack: false },
+	{ key: "progress", title: "进度", heading: "## Progress", inPack: false },
+	{ key: "verify", title: "验证记录", heading: "## 验证记录", inPack: true },
+	{ key: "failures", title: "最近失败", heading: "## 最近失败", inPack: true },
+	{ key: "goal", title: "目标", heading: "## Goal", inPack: false },
+	{ key: "next", title: "下一步", heading: "## Next Steps", inPack: false },
+	{ key: "decisions", title: "关键决策", heading: "## Key Decisions", inPack: false },
+	{ key: "users", title: "用户原话", heading: "## 用户原话", inPack: true },
+];
+// 输出时按这个顺序排列，便于评估者阅读。
+const SECTION_ORDER = ["goal", "constraints", "progress", "decisions", "next", "verify", "failures", "users"];
+
+/** 按二级标题切分；skipEscaped 为真时以转义前缀开头的行不参与标题识别，只作为正文。 */
+function splitSections(text: string, skipEscaped: boolean): Map<string, string> {
+	const out = new Map<string, string>();
+	let current: string | null = null;
+	let lines: string[] = [];
+	const flush = () => {
+		if (current !== null) out.set(current, lines.join("\n").trim());
+	};
+	for (const line of text.split("\n")) {
+		const structural = !skipEscaped || !line.startsWith(ESCAPE_PREFIX);
+		if (structural && /^## (?!#)/.test(line.trim())) {
+			flush();
+			current = line.trim();
+			lines = [];
+		} else if (current !== null) lines.push(line);
+	}
+	flush();
+	return out;
+}
+
+/**
+ * 从带 smart-compact 压缩包的摘要中提取评估需要的章节。
+ * 先定位完整的压缩包边界，把摘要分成叙述与压缩包两段，再分别按标题提取；没有完整压缩包时返回 null。
+ * 每节最多 SECTION_LIMIT 字符，合计（含标题、包装与截断提示）最多 limit 字符，超出时按 SECTION_PRIORITY 的顺序保留。
+ */
+export function extractStructuredSummary(summary: string, limit = STRUCTURED_SUMMARY_LIMIT): string | null {
+	const lines = summary.split("\n");
+	const open = lines.findIndex((l) => l.trim() === PACK_OPEN);
+	const close = lines.findIndex((l, i) => i > open && l.trim() === PACK_CLOSE);
+	if (open < 0 || close < 0) return null;
+	const narrative = splitSections(lines.slice(0, open).join("\n"), false);
+	const pack = splitSections(lines.slice(open + 1, close).join("\n"), true);
+	const find = (map: Map<string, string>, heading: string) => [...map.entries()].find(([h]) => h === heading || h.startsWith(`${heading}（`))?.[1];
+	const chosen = new Map<string, string>();
+	let used = 0;
+	for (const sec of SECTION_PRIORITY) {
+		const body = find(sec.inPack ? pack : narrative, sec.heading);
+		if (!body) continue;
+		const header = `### ${sec.title}\n`;
+		const room = Math.min(SECTION_LIMIT, limit - used - header.length - 2);
+		if (room <= 40) break;
+		const text = header + clip(body, room - 30);
+		chosen.set(sec.key, text);
+		used += text.length + 2;
+	}
+	return SECTION_ORDER.filter((k) => chosen.has(k)).map((k) => chosen.get(k)).join("\n\n");
+}
+
+/** 最新 compaction 之后出现目标位于其保留区之前的 context_edit 时，该摘要依据的历史已被修改，摘要作废。 */
+export function isLatestSummaryInvalid(branch: readonly { type: string; id: string; targetId?: string; firstKeptEntryId?: string }[]): boolean {
+	let ci = -1;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		if (branch[i].type === "compaction") {
+			ci = i;
+			break;
+		}
+	}
+	if (ci < 0) return false;
+	const kept = branch.findIndex((e) => e.id === branch[ci].firstKeptEntryId);
+	const boundary = kept >= 0 ? kept : ci;
+	const before = new Set(branch.slice(0, boundary).map((e) => e.id));
+	return branch.slice(ci + 1).some((e) => e.type === "context_edit" && e.targetId !== undefined && before.has(e.targetId));
+}
+
+export interface SerializeOptions {
+	/** 最新摘要已作废时为真，摘要不收录，改为一行说明。 */
+	summaryInvalid?: boolean;
+}
+
 /**
  * 把当前生效的会话条目整理成评估用的文本。
  * ownCustomType 是本扩展续跑消息的 customType，这些消息只是转述上一次的评估结论，不作为证据，跳过。
+ * 只收录第一条压缩摘要：buildContextEntries 中最新的 compaction 位于首位，更早的摘要已被增量合并进它。
+ * 摘要放在最前面并计入整体上限：带 smart-compact 压缩包时按章节提取（最多 STRUCTURED_SUMMARY_LIMIT 字符），否则保留开头 TEXT_LIMIT 字符。
  */
-export function serializeTranscript(entries: TranscriptEntry[], ownCustomType: string, limit = TRANSCRIPT_LIMIT): string {
-	// 压缩摘要单独放在最前面，整体超限时不参与丢弃：它是压缩之前全部工作的唯一记录，早期证据只能从这里看到。
-	const summaries: string[] = [];
+export function serializeTranscript(entries: TranscriptEntry[], ownCustomType: string, limit = TRANSCRIPT_LIMIT, options: SerializeOptions = {}): string {
+	let summaryText: string | null = null;
 	const parts: string[] = [];
 	for (const entry of entries) {
-		if (entry.type === "compaction" && entry.summary) {
-			summaries.push(`[早先对话的摘要]\n${clip(entry.summary, TEXT_LIMIT)}`);
+		if (entry.type === "compaction") {
+			if (summaryText !== null || !entry.summary) continue;
+			if (options.summaryInvalid) summaryText = "[早先对话的摘要]\n（早先摘要已作废，正在重建）";
+			else summaryText = `[早先对话的摘要]\n${extractStructuredSummary(entry.summary, Math.min(STRUCTURED_SUMMARY_LIMIT, limit)) ?? clip(entry.summary, TEXT_LIMIT)}`;
 			continue;
 		}
 		if (entry.type === "custom_message") {
@@ -89,10 +182,13 @@ export function serializeTranscript(entries: TranscriptEntry[], ownCustomType: s
 			parts.push(`[工具结果 ${m.toolName ?? ""}${m.isError ? "（出错）" : ""}]\n${clipKeepTail(textOf(m.content), TOOL_RESULT_LIMIT)}`);
 		}
 	}
-	const head = summaries.map((s) => `${s}\n\n`).join("");
+	const head = summaryText === null ? "" : `${summaryText.slice(0, limit)}\n\n`;
 	const budget = Math.max(0, limit - head.length);
 	let text = parts.join("\n\n");
-	if (text.length > budget) text = `…（更早的对话已省略）\n\n${text.slice(text.length - budget)}`;
+	if (text.length > budget) {
+		const marker = "…（更早的对话已省略）\n\n";
+		text = budget > marker.length ? `${marker}${text.slice(text.length - (budget - marker.length))}` : "";
+	}
 	return head + text;
 }
 
