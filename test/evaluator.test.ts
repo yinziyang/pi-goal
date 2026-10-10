@@ -115,7 +115,9 @@ test("结构化摘要的总长度不超过上限，约束优先保留，用户�
 
 test("摘要计入整体上限；不含压缩包时沿用开头截断；作废时只写一行说明", () => {
 	const t = serializeTranscript([{ type: "compaction", summary: "x".repeat(9000) }, { type: "message", message: { role: "user", content: "y".repeat(9000) } }], "c", 6000);
-	assert.ok(t.length <= 6000 + 80, String(t.length));
+	assert.ok(t.length <= 6000, String(t.length));
+	assert.ok(serializeTranscript([{ type: "compaction", summary: "x".repeat(9000) }], "c", 4000).length <= 4000);
+	assert.ok(serializeTranscript([{ type: "compaction", summary: "x".repeat(3998) }], "c", 4000).length <= 4000);
 	assert.match(t, /已截断，原长 9000 字符/);
 	const inv = serializeTranscript([{ type: "compaction", summary: `${NARRATIVE}\n\n${PACK}` }], "c", undefined, { summaryInvalid: true });
 	assert.match(inv, /早先摘要已作废，正在重建/);

@@ -182,7 +182,8 @@ export function serializeTranscript(entries: TranscriptEntry[], ownCustomType: s
 			parts.push(`[工具结果 ${m.toolName ?? ""}${m.isError ? "（出错）" : ""}]\n${clipKeepTail(textOf(m.content), TOOL_RESULT_LIMIT)}`);
 		}
 	}
-	const head = summaryText === null ? "" : `${summaryText.slice(0, limit)}\n\n`;
+	// 标签与分隔符一起计入整体上限。
+	const head = summaryText === null ? "" : `${summaryText}\n\n`.slice(0, limit);
 	const budget = Math.max(0, limit - head.length);
 	let text = parts.join("\n\n");
 	if (text.length > budget) {
